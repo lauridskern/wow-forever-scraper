@@ -1,0 +1,94 @@
+name: daily-scrape
+
+# Daily Wowhead Forever snapshot: item listing + drop tables, through the
+# Cloudflare relay so the runner's datacenter IP never touches Wowhead directly.
+# Public repo: unlimited free Actions minutes.
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # 04:23 UTC daily
+  workflow_dispatch: # manual runs for testing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      WOWHEAD_WORKER_URL: ${{ secrets.WOWHEAD_WORKER_URL }}
+      WOWHEAD_WORKER_KEY: ${{ secrets.WOWHEAD_WORKER_KEY }}
+      # Ubuntu runners ship Google Chrome; the repo's auto-detection finds it.
+      WOWHEAD_CHROME_PATH: /usr/bin/google-chrome
+      MINT_FAILURE_BACKOFF_MS: "120000"
+      LOG_LEVEL: warn
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: ensure a Chromium for token minting
+        run: |
+          if ! command -v google-chrome; then
+            npx playwright install chromium
+            echo "WOWHEAD_CHROME_PATH=" >> "$GITHUB_ENV" # auto-detect via Playwright cache
+          fi
+
+      # ~15 min: the partition tree over Wowhead's item listing (fresh each run,
+      # so the dataset is rebuilt, not patched).
+      - name: scrape all items (listing)
+        run: node scripts/scrape-items.mjs
+
+      # 1 request: merge the official Forever item sitemap, which also carries
+      # every item Wowhead's listing UI hides (placeholders, deprecated gear).
+      - name: merge item sitemap
+        run: node scripts/merge-sitemap.mjs
+
+      # ~30-50 min: full drop tables for every farmable item, through the relay.
+      - name: scrape drop tables
+        run: node scripts/scrape-drops-worker.mjs
+
+      # Push the snapshot into the PRIVATE data repo. items.json + items.csv are
+      # the product; item-drops.jsonl is the raw checkpoint (kept for debugging).
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATA_REPO }}
+          token: ${{ secrets.DATA_REPO_PAT }}
+          path: data-repo
+
+      - name: commit snapshot
+        run: |
+          mkdir -p data-repo/data
+          cp data/items.json data-repo/data/items.json
+          cp data/items.csv data-repo/data/items.csv
+          cp data/item-drops.jsonl data-repo/data/item-drops.jsonl
+          cd data-repo
+          git config user.name "scrape-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/
+          git commit -m "daily snapshot $(date -u +%F)" || echo "no changes"
+          git push
+
+      # Optional: ping the addon repo so its own workflow rebuilds + releases.
+      # Leave the ADDON_REPO secret empty to skip.
+      - name: notify addon repo
+        env:
+          GH_TOKEN: ${{ secrets.DATA_REPO_PAT }}
+          ADDON_REPO: ${{ secrets.ADDON_REPO }}
+        run: |
+          if [ -z "$ADDON_REPO" ]; then
+            echo "ADDON_REPO not set — skipping notification"
+          else
+            gh api "repos/$ADDON_REPO/dispatches" -f event_type=data-updated
+          fi

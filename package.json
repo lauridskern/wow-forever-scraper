@@ -1,0 +1,24 @@
+{
+  "name": "wow-forever-scraper",
+  "version": "1.0.0",
+  "description": "Scrapes the Wowhead WoW: Forever item database (full listing + drop tables) through a Cloudflare relay",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lauridskern/wow-forever-scraper.git"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pino": "^9.6.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
