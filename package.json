@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lauridskern/wow-forever-scraper.git"
+    "url": "git+https://github.com/uposum/wow-forever-scraper.git"
   },
   "scripts": {
     "build": "tsc",
