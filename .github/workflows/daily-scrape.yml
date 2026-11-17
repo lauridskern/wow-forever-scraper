@@ -6,7 +6,7 @@ name: daily-scrape
 
 on:
   schedule:
-    - cron: "23 4 * * *" # 04:23 UTC daily
+    - cron: "23 4 * * *" # 04:23 UTC daily (GitHub cron is best-effort; may start late)
   workflow_dispatch: # manual runs for testing
 
 permissions:
