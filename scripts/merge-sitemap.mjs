@@ -23,7 +23,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const outDir = join(root, 'data');
 const jsonFile = join(outDir, 'items.json');
-const csvFile = join(outDir, 'items.csv');
 
 const { loadEnv } = await import(pathToFileURL(join(root, 'dist', 'config.js')));
 const { WowheadClient } = await import(pathToFileURL(join(root, 'dist', 'wowhead', 'client.js')));
@@ -88,7 +87,7 @@ for (const [id, slug] of sitemap) {
 }
 for (const t of thin) byId.set(t.id, t);
 
-// ── 3. Save (JSON + CSV) ────────────────────────────────────────────────────
+// ── 3. Save ────────────────────────────────────────────────────────────
 const payload = {
   scrapedAt: new Date().toISOString(),
   totalOnWowhead: current.totalOnWowhead,
@@ -102,27 +101,13 @@ const payload = {
 mkdirSync(outDir, { recursive: true });
 writeFileSync(jsonFile, JSON.stringify(payload, null, 1));
 
-const CSV_COLUMNS = [
-  'id', 'name', 'quality', 'itemLevel', 'requiredLevel', 'slot', 'dps', 'speed',
-  'damageMin', 'damageMax', 'armor', 'stats', 'obtainedBy', 'from', 'zone', 'sellPrice', 'url', 'slug',
-];
-const cell = (v) => {
-  if (v === undefined || v === null) return '';
-  const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
-const lines = [CSV_COLUMNS.join(',')];
-for (const item of byId.values()) {
-  lines.push(CSV_COLUMNS.map((c) => cell(item[c])).join(','));
-}
-writeFileSync(csvFile, lines.join('\n'));
 
 console.error('');
 console.error(`Forever sitemap items        : ${sitemap.size}`);
 console.error(`Items with full listing data : ${scraped.length}`);
 console.error(`Items named from slug only   : ${thin.length}`);
 console.error(`Unique items in dataset      : ${byId.size}`);
-console.error(`Files                        : ${jsonFile} / ${csvFile}`);
+console.error(`File                         : ${jsonFile}`);
 console.error('');
 console.error('Thin entries carry id + name + url only (Wowhead hides them from every listing).');
-console.error('Run scripts/enrich-items.mjs later to backfill stats via the tooltip service.');
+console.error('scripts/scrape-pages.mjs reads their pages and fills in the details.');

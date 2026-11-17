@@ -357,6 +357,11 @@ export interface Listview {
   id: string;
   template?: string;
   rows: Record<string, unknown>[];
+  /**
+   * Set when Wowhead embedded only part of the table (`_truncated: 1`): the
+   * number of rows it says exist, e.g. "230 NPCs found (200 displayed)".
+   */
+  truncatedFrom?: number;
 }
 
 /** Find every `new Listview({...})` on a Wowhead page. */
@@ -378,7 +383,14 @@ export function parseListviews(html: string): Listview[] {
         rows = parsed.filter((x): x is Record<string, unknown> => !!x && typeof x === 'object');
       }
     }
-    if (id) out.push({ id, ...(template ? { template } : {}), rows });
+    // The options before `data:` say whether the table was cut short.
+    const head = dataMatch ? objText.slice(0, dataMatch.index) : objText;
+    let truncatedFrom: number | undefined;
+    if (/\b_truncated\s*:\s*(1|true)\b/.test(head)) {
+      const note = /\bnote\s*:\s*WH\.sprintf\(\s*WH\.TERMS\.\w+\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/.exec(head);
+      truncatedFrom = note ? Number(note[1]) : rows.length;
+    }
+    if (id) out.push({ id, ...(template ? { template } : {}), rows, ...(truncatedFrom !== undefined ? { truncatedFrom } : {}) });
   }
   return out;
 }

@@ -1,7 +1,7 @@
 {
   "name": "wow-forever-scraper",
   "version": "1.0.0",
-  "description": "Scrapes the Wowhead WoW: Forever item database (full listing + drop tables) through a Cloudflare relay",
+  "description": "Scrapes the Wowhead WoW: Forever database (items, every source table, NPC spawns) through a Cloudflare relay",
   "type": "module",
   "private": true,
   "license": "MIT",
@@ -11,7 +11,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsc && node --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "pino": "^9.6.0",
@@ -20,5 +21,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -1,16 +1,38 @@
 name: daily-scrape
 
-# Daily Wowhead Forever snapshot: item listing + drop tables, through the
-# Cloudflare relay so the runner's datacenter IP never touches Wowhead directly.
-# Public repo: unlimited free Actions minutes.
+# Daily Wowhead Forever snapshot: the item listing, the item and NPC pages that
+# are due, through the Cloudflare relay so the runner's datacenter IP never
+# touches Wowhead directly. Public repo: unlimited free Actions minutes.
+#
+# Commits to the private data repo only when scripts/check-snapshot.mjs finds
+# nothing wrong (nothing shrank, pages still parse, the relay works), then pings
+# the addon repo, which builds a release from it.
 
 on:
   schedule:
-    - cron: "23 4 * * *" # 04:23 UTC daily (GitHub cron is best-effort; may start late)
-  workflow_dispatch: # manual runs for testing
+    - cron: "29 4 * * *" # 04:29 UTC daily (GitHub cron is best-effort; may start late)
+  workflow_dispatch:
+    inputs:
+      item_budget:
+        description: Item pages to read at most (empty = 14000)
+        required: false
+        default: ""
+      npc_budget:
+        description: NPC pages to read at most (empty = 4000)
+        required: false
+        default: ""
+      dry_run:
+        description: Build and check the snapshot, but don't commit it
+        type: boolean
+        default: false
+      skip_check:
+        description: Commit even if the snapshot check fails (a known, deliberate drop)
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write # the keepalive commit, see the last step
+  actions: write # the keepalive re-enable, see the last step
 
 concurrency:
   group: daily-scrape
@@ -19,7 +41,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300
     env:
       WOWHEAD_WORKER_URL: ${{ secrets.WOWHEAD_WORKER_URL }}
       WOWHEAD_WORKER_KEY: ${{ secrets.WOWHEAD_WORKER_KEY }}
@@ -36,7 +58,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run build
+      - run: npm test # builds, then the parser and snapshot tests
 
       - name: ensure a Chromium for token minting
         run: |
@@ -45,44 +67,61 @@ jobs:
             echo "WOWHEAD_CHROME_PATH=" >> "$GITHUB_ENV" # auto-detect via Playwright cache
           fi
 
-      # ~15 min: the partition tree over Wowhead's item listing (fresh each run,
-      # so the dataset is rebuilt, not patched).
-      - name: scrape all items (listing)
-        run: node scripts/scrape-items.mjs
-
-      # 1 request: merge the official Forever item sitemap, which also carries
-      # every item Wowhead's listing UI hides (placeholders, deprecated gear).
-      - name: merge item sitemap
-        run: node scripts/merge-sitemap.mjs
-
-      # ~30-50 min: full drop tables for every farmable item, through the relay.
-      - name: scrape drop tables
-        run: node scripts/scrape-drops-worker.mjs
-
-      # Push the snapshot into the PRIVATE data repo. items.json + items.csv are
-      # the product; item-drops.jsonl is the raw checkpoint (kept for debugging).
+      # The previous snapshot: pages that aren't due (or fail) today keep its data.
       - uses: actions/checkout@v4
         with:
           repository: ${{ secrets.DATA_REPO }}
           token: ${{ secrets.DATA_REPO_PAT }}
           path: data-repo
 
-      - name: commit snapshot
+      # ~15 min: the partition tree over Wowhead's item listing.
+      - name: scrape the item listing
+        run: node scripts/scrape-items.mjs
+
+      # 1 request: the Forever item sitemap, which also has the items the listing hides.
+      - name: merge the item sitemap
+        run: node scripts/merge-sitemap.mjs
+
+      # ~30-60 min: item pages (every source table) and NPC pages (spawn points).
+      - name: read item and NPC pages
+        env:
+          ITEM_PAGE_BUDGET: ${{ inputs.item_budget }}
+          NPC_PAGE_BUDGET: ${{ inputs.npc_budget }}
+          CRAWL_DEADLINE_MIN: "220"
+        run: node scripts/scrape-pages.mjs --prev data-repo/data
+
+      - name: build the snapshot
+        run: node scripts/build-snapshot.mjs --prev data-repo/data
+
+      - name: check the snapshot
+        env:
+          SNAPSHOT_CHECK: ${{ inputs.skip_check && 'off' || 'on' }}
+        run: node scripts/check-snapshot.mjs data-repo/data
+
+      - name: commit the snapshot
+        id: commit
+        if: ${{ !inputs.dry_run }}
         run: |
-          mkdir -p data-repo/data
-          cp data/items.json data-repo/data/items.json
-          cp data/items.csv data-repo/data/items.csv
-          cp data/item-drops.jsonl data-repo/data/item-drops.jsonl
           cd data-repo
           git config user.name "scrape-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/
-          git commit -m "daily snapshot $(date -u +%F)" || echo "no changes"
-          git push
+          git add -A data/
+          summary=$(node -e '
+            const m = JSON.parse(require("fs").readFileSync("data/manifest.json", "utf8"));
+            const c = m.counts;
+            console.log(`${c.items} items, ${c.dropTables} drop tables, ${c.npcsWithSpawns} NPCs with spawns`);
+          ')
+          if git commit -q -m "daily snapshot $(date -u +%F): $summary"; then
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no changes"
+          fi
 
-      # Optional: ping the addon repo so its own workflow rebuilds + releases.
+      # Ping the addon repo so its own workflow rebuilds and releases.
       # Leave the ADDON_REPO secret empty to skip.
       - name: notify addon repo
+        if: steps.commit.outputs.committed == 'true'
         env:
           GH_TOKEN: ${{ secrets.DATA_REPO_PAT }}
           ADDON_REPO: ${{ secrets.ADDON_REPO }}
@@ -92,4 +131,32 @@ jobs:
           elif ! gh api "repos/$ADDON_REPO/dispatches" -f event_type=data-updated; then
             # The snapshot is already pushed; the addon repo also checks for new data every 6 hours.
             echo "::warning::Couldn't notify $ADDON_REPO (can DATA_REPO_PAT reach it?). It will pick up the snapshot on its next scheduled check."
+          fi
+
+      - name: keep the run's stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-run
+          path: |
+            data/pages/run.json
+            data-repo/data/manifest.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # GitHub disables scheduled workflows in a public repo after 60 days without
+      # activity, and this workflow commits to the data repo, not here. Re-enable it
+      # every run, and if nothing was committed here for 45 days, add an empty commit.
+      - name: keepalive
+        if: always() && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/daily-scrape.yml/enable" || true
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -q -m "keepalive: no commits for 45 days"
+            git push || echo "::warning::keepalive commit couldn't be pushed"
           fi

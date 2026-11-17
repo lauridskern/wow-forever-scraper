@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Scrape EVERY item in the Wowhead Forever database into data/items.json (+ CSV).
+ * Scrape EVERY item in the Wowhead Forever item listing into data/items.json
+ * (an intermediate file: the snapshot itself is built by scripts/build-snapshot.mjs).
  *
  * Wowhead never displays more than 1000 rows per listing page (23,758 items as
  * of writing), so this walks a partition tree instead of one page:
@@ -32,7 +33,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const outDir = join(root, 'data');
 const jsonFile = join(outDir, 'items.json');
-const csvFile = join(outDir, 'items.csv');
 
 // Load .env before loadEnv() reads process.env.
 function* readEnv(file) {
@@ -64,20 +64,9 @@ const env = loadEnv();
 // through the Cloudflare relay: Actions runners sit on Azure datacenter IPs,
 // which Wowhead's edge throttles directly. Token minting and the tooltip
 // service (nether.wowhead.com) stay direct — they were never throttled.
-const relayUrl = process.env.WOWHEAD_WORKER_URL;
-const relayKey = process.env.WOWHEAD_WORKER_KEY;
-let client;
-if (relayUrl && relayKey) {
-  const relayedFetch = (url, init = {}) => {
-    const target = String(url instanceof Request ? url.url : url);
-    if (!target.startsWith(`${env.WOWHEAD_BASE_URL}/`)) return fetch(url, init);
-    const workerUrl = `${relayUrl}?key=${encodeURIComponent(relayKey)}&url=${encodeURIComponent(target)}`;
-    return fetch(workerUrl, { method: 'GET', headers: init.headers });
-  };
-  client = new WowheadClient(env, { fetch: relayedFetch });
-} else {
-  client = new WowheadClient(env);
-}
+const { relayFromEnv, relayedFetch } = await import(pathToFileURL(join(root, 'dist', 'wowhead', 'relay.js')));
+const relay = relayFromEnv();
+const client = relay ? new WowheadClient(env, { fetch: relayedFetch(relay, env.WOWHEAD_BASE_URL) }) : new WowheadClient(env);
 const spec = specForPath('items');
 const globals = await client.globalNames();
 const ctx = { globals, names: new Map(), pageUrl: (p, id) => client.pageUrl(p, id) };
@@ -226,28 +215,10 @@ function save(items) {
     uniqueItemsScraped: items.size,
     chunks: chunksSeen,
     warnings,
-    items: [...items.values()],
+    items: [...items.values()].sort((a, b) => a.id - b.id),
   };
   mkdirSync(outDir, { recursive: true });
   writeFileSync(jsonFile, JSON.stringify(payload, null, 1));
-  writeCsv(items);
-}
-
-const CSV_COLUMNS = [
-  'id', 'name', 'quality', 'itemLevel', 'requiredLevel', 'slot', 'dps', 'speed',
-  'damageMin', 'damageMax', 'armor', 'stats', 'obtainedBy', 'from', 'zone', 'sellPrice', 'url',
-];
-function writeCsv(items) {
-  const cell = (v) => {
-    if (v === undefined || v === null) return '';
-    const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const lines = [CSV_COLUMNS.join(',')];
-  for (const item of items.values()) {
-    lines.push(CSV_COLUMNS.map((c) => cell(item[c])).join(','));
-  }
-  writeFileSync(csvFile, lines.join('\n'));
 }
 
 function absorb(tree, label, probeTotal) {
@@ -299,14 +270,17 @@ if (leafTotalSum < grandTotal) {
 }
 
 // ── Reconciliation ──────────────────────────────────────────────────────────
+// The warning goes in BEFORE the final save, so it reaches the file. Items the
+// listing misses still come in from the sitemap, and their own pages fill in
+// the details (scripts/scrape-pages.mjs).
+if (byId.size < grandTotal) {
+  warnings.push(`Unique items scraped (${byId.size}) < Wowhead's grand total (${grandTotal}) — ${grandTotal - byId.size} item(s) remain unseen by the listing.`);
+}
 save(byId);
 console.error('');
 console.error(`Wowhead grand total : ${grandTotal}`);
 console.error(`Unique items saved  : ${byId.size}${byId.size === grandTotal ? '  (complete match)' : ''}`);
-console.error(`Files               : ${jsonFile} / ${csvFile}`);
-if (byId.size < grandTotal) {
-  warnings.push(`Unique items scraped (${byId.size}) < Wowhead's grand total (${grandTotal}) — ${grandTotal - byId.size} item(s) remain unseen.`);
-}
+console.error(`File                : ${jsonFile}`);
 if (warnings.length > 0) {
   console.error('Warnings:');
   for (const w of warnings) console.error(`- ${w}`);
