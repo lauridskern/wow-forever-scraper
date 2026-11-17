@@ -89,6 +89,7 @@ jobs:
         run: |
           if [ -z "$ADDON_REPO" ]; then
             echo "ADDON_REPO not set — skipping notification"
-          else
-            gh api "repos/$ADDON_REPO/dispatches" -f event_type=data-updated
+          elif ! gh api "repos/$ADDON_REPO/dispatches" -f event_type=data-updated; then
+            # The snapshot is already pushed; the addon repo also checks for new data every 6 hours.
+            echo "::warning::Couldn't notify $ADDON_REPO (can DATA_REPO_PAT reach it?). It will pick up the snapshot on its next scheduled check."
           fi
